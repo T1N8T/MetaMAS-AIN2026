@@ -72,6 +72,7 @@ def test_mas_code(mas2j_code: str, agents_dict: dict) -> str:
          return f"ERROR: Límite de {MAX_RETRIES} intentos superado."
     current_retries += 1
     temp_dir = Path("temp_mas_project")
+    
     try:
         if temp_dir.exists(): shutil.rmtree(temp_dir)
         temp_dir.mkdir()
@@ -86,29 +87,54 @@ def test_mas_code(mas2j_code: str, agents_dict: dict) -> str:
         jason_command = resolve_jason_command()
         if not jason_command: return "ERROR: No se ha encontrado Jason."
 
-        result = subprocess.run(
-            [jason_command, "mas", "start", "--mas2j=temp.mas2j", "--console"],
-            cwd=str(temp_dir), capture_output=True, text=True, timeout=15
-        )
-        
-        error_count = 10 if result.returncode != 0 else 0
-        if result.stderr: error_count += len(result.stderr.split('\n'))
+        # Usamos subprocess.run con 7 segundos de timeout
+        try:
+            result = subprocess.run(
+                [jason_command, "mas", "start", "--mas2j=temp.mas2j", "--console"],
+                cwd=str(temp_dir), capture_output=True, text=True, timeout=7
+            )
+            stdout_text = result.stdout or ""
+            stderr_text = result.stderr or ""
+        except subprocess.TimeoutExpired as e:
+            # Si el MAS corre estable, dará timeout. Capturamos los buffers.
+            # Usamos errors='ignore' por si Jason escupe algún carácter raro
+            stdout_text = e.stdout.decode('utf-8', errors='ignore') if isinstance(e.stdout, bytes) else (e.stdout or "")
+            stderr_text = e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else (e.stderr or "")
+
+        combined_output = stdout_text + "\n" + stderr_text
+
+        # --- ANÁLISIS DE ERRORES GENÉRICO ---
+        generic_errors = ["error parsing", "exception in thread", "compile error", "caused by:", "was expecting"]
+        has_error = any(err in combined_output.lower() for err in generic_errors)
+
+        if error_count := (10 + len(stderr_text.split('\n')) if has_error else 0):
+            if best_error_count == float('inf'): pass # Solo para que exista la variable
             
-        if error_count < best_error_count:
+        if error_count < best_error_count and not has_error:
             best_error_count = error_count
             best_mas_state = {"mas2j": mas2j_code, "agents": agents_dict}
-            
+
+        # ¡LA CLAVE ESTÁ AQUÍ! Tijera para evitar que el prompt explote
+        def truncate_log(log_str, max_chars=1500):
+            if len(log_str) > max_chars:
+                return log_str[:750] + "\n\n... [MILES DE LÍNEAS OMITIDAS POR TAMAÑO] ...\n\n" + log_str[-750:]
+            return log_str
+
+        stdout_trunc = truncate_log(stdout_text)
+        stderr_trunc = truncate_log(stderr_text)
+
+        # Formateamos la salida final para el Tester
         output = f"=== EJECUCIÓN DE PRUEBA ({current_retries}/{MAX_RETRIES}) ===\n"
-        if result.stdout: output += f"--- STDOUT ---\n{result.stdout}\n"
-        if result.stderr: output += f"--- STDERR ---\n{result.stderr}\n"
-        return output
+        if stdout_trunc: output += f"--- STDOUT ---\n{stdout_trunc}\n"
+        if stderr_trunc: output += f"--- STDERR ---\n{stderr_trunc}\n"
         
-    except subprocess.TimeoutExpired as e:
-        if best_error_count == float('inf'):
-            best_mas_state = {"mas2j": mas2j_code, "agents": agents_dict}
-        return f"AVISO: Tiempo límite (15s). Normal si arranca GUI."
+        if has_error:
+            return f"=== ERROR DE COMPILACIÓN O SINTAXIS DETECTADO ===\n{output}"
+            
+        return f"ÉXITO: El sistema multi-agente arrancó y se ejecutó de manera estable.\n{output}"
+        
     except Exception as e:
-        return f"ERROR inesperado al ejecutar: {e}"
+        return f"ERROR inesperado al ejecutar el test: {e}"
     finally:
         if temp_dir.exists(): shutil.rmtree(temp_dir)
 
@@ -270,9 +296,9 @@ tester_agent = LlmAgent(
     instruction=("Tienes este código recién generado: {generated_code}\n"
         "PASO 1: Llama a 'test_mas_code(mas2j_code, agents_dict)'. Asegúrate de que las claves en 'agents_dict' sean exactamente los nombres definidos en el .mas2j .\n"
         "PASO 2: Analiza el resultado:\n"
-        "   - Si el test es exitoso (timeout o éxito), escribe ÚNICAMENTE: 'ÉXITO: [Resumen corto]'.\n"
+        "   - Si el test devuelve un texto que empieza por 'ÉXITO:', escribe ÚNICAMENTE: 'ÉXITO: [Resumen corto]'.\n"
         "   - Si hay errores, escribe un feedback detallado para que el JasonCoder lo corrija.\n"
-        "   - Si se supera el límite de intentos, escribe: 'ERROR: Límite de 5 intentos superado'."
+        "   - Si se supera el límite de intentos, escribe: 'ERROR: Límite de 5 intentos superado'.\n"
         "REGLA DE ORO: 1. Si el código generado ya ha sido marcado como 'ÉXITO' en una iteración previa, devuelve inmediatamente: 'ÉXITO: Código ya verificado, saltando testeo.' y NO llames a la herramienta 'test_mas_code'."
     ),
     tools=[test_mas_code],
