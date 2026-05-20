@@ -15,8 +15,8 @@ from google.adk.runners import InMemoryRunner
 
 load_dotenv()
 
-OUTPUT_DIR = Path("output")
-OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = Path("../output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_RETRIES = 5
 current_retries = 0
@@ -157,11 +157,11 @@ analyzer_agent = LlmAgent(
     description="Analiza el prompt del usuario para estructurar el problema Multi-Agente.",
     instruction=(
         "Eres el arquitecto principal de un sistema generador de código BDI en Jason.\n"
-        "Analiza la petición del usuario y genera un resumen estructurado con:\n"
-        "1. Objetivo del Sistema: ¿Qué debe hacer el MAS?\n"
-        "2. Agentes Requeridos: Lista los agentes que intervienen y sus roles.\n"
-        "3. Términos de Búsqueda Clave: 3 palabras clave (en inglés) que tus compañeros usarán para buscar en la documentación de Jason BDI.\n"
-        "4. Nombre del proyecto (una sola palabra, en minúsculas)."
+        "Analiza la petición del usuario y genera un resumen ESTRICTO con 4 puntos:\n"
+        "1. OBJETIVO: ¿Qué debe hacer el MAS?\n"
+        "2. AGENTES: Lista los agentes que intervienen y sus roles.\n"
+        "3. CONCEPTOS TÉCNICOS BDI: Traduce lo que pide el usuario a 3 conceptos técnicos puros de Jason/AgentSpeak en inglés (ej. 'KQML message passing', 'tell', 'recursion', 'bidding').\n"
+        "4. PROYECTO: Nombre del proyecto (una sola palabra, en minúsculas)."
     ),
     output_key="analysis_result" 
 )
@@ -172,8 +172,14 @@ analyzer_agent = LlmAgent(
 rag_researcher = LlmAgent(
     name="RAG_Researcher",
     model=model,
-    description="Busca teoría BDI y sintaxis en la documentación local.",
-    instruction="Usa el análisis previo: {analysis_result} para buscar teoría técnica en la documentación. (Prompt por pulir)",
+    description="Busca teoría BDI y sintaxis en los PDF locales.",
+    instruction=(
+        "Usa el análisis previo: {analysis_result}\n"
+        "ESTÁS OBLIGADO a llamar a la herramienta 'search_local_docs(query)'.\n"
+        "Usa como 'query' los conceptos técnicos para extraer la teoría sobre cómo se programan esas acciones. Resume la sintaxis obligatoria."
+        "ESTÁ ESTRÍCTAMENTE PROHIBIDO que escribas código .asl o .mas2j para resolver el problema del usuario."
+        "Devuelve ÚNICAMENTE un resumen de la sintaxis teórica que has encontrado."
+    ),
     tools=[rag.search_local_docs],
     output_key="theory_context"
 )
@@ -181,8 +187,16 @@ rag_researcher = LlmAgent(
 github_researcher = LlmAgent(
     name="GitHub_Researcher",
     model=model,
-    description="Busca ejemplos de arquitectura BDI en GitHub.",
-    instruction="Usa el análisis previo: {analysis_result} para buscar ejemplos en el repositorio oficial de Jason. (Prompt por pulir)",
+    description="Busca ejemplos de arquitectura y sintaxis BDI en GitHub.",
+    instruction=(
+        "Usa el análisis previo: {analysis_result}\n"
+        "Tu misión es encontrar ejemplos de código real para evitar errores de sintaxis.\n"
+        "PASO 1: Llama a search_github_examples(path=\"\") para ver las carpetas.\n"
+        "PASO 2: Entra en una carpeta relevante (ej. si ves 'ping', llama a search_github_examples(path=\"ping\") para listar su interior).\n"
+        "PASO 3: ESTÁS OBLIGADO a leer el contenido de un archivo con extensión '.mas2j' para ver su estructura exacta, llamando a search_github_examples(path=\"carpeta_elegida/archivo.mas2j\").\n"
+        "Devuelve un resumen con el contenido exacto del .mas2j encontrado y los comandos clave de los .asl."
+        "ESTÁ ESTRÍCTAMENTE PROHIBIDO que escribas código .asl o .mas2j para resolver el problema del usuario."
+    ),
     tools=[search_github_examples],
     output_key="github_context"
 )
@@ -198,16 +212,29 @@ knowledge_gatherer = ParallelAgent(
 coder_agent = LlmAgent(
     name="JasonCoder",
     model=model,
-    description="Redacta el código .mas2j y .asl basado en la investigación.",
-    instruction="Escribe el código usando la teoría: {theory_context} y ejemplos: {github_context}. (Prompt por pulir)",
+    description="Programa el MAS respetando estrictamente la sintaxis de Jason.",
+    instruction=("Basado en el análisis: {analysis_result}, Teoría: {theory_context}, y Ejemplos: {github_context}.\n"
+        "Feedback previo (si fallaste): {test_feedback}\n"
+        "REGLAS CRÍTICAS PARA .asl:\n"
+        "1. Variables en Mayúscula, átomos en minúscula.\n"
+        "2. Todo plan u objetivo DEBE acabar con punto (.).\n"
+        "3. Envíos de mensajes: .send(receiver, tell, ping).\n\n"
+        "Genera el código para el .mas2j y los .asl correspondientes separando claramente qué es qué."
+    ),
     output_key="generated_code"
 )
 
 tester_agent = LlmAgent(
     name="CodeTester",
     model=model,
-    description="Prueba el código generado y decide si iterar.",
-    instruction="Prueba el código {generated_code} usando test_mas_code. (Prompt por pulir)",
+    description="Prueba el código generado y decide si iterar o salir del bucle.",
+    instruction=("Tienes este código recién generado: {generated_code}\n"
+        "PASO 1: Llama a 'test_mas_code(mas2j_code, agents_dict)'. Asegúrate de que las claves en 'agents_dict' sean exactamente los nombres definidos en el .mas2j .\n"
+        "PASO 2: Revisa la respuesta.\n"
+        "- Si el log muestra 'ERROR: Límite de 5 intentos superado', ESTÁS OBLIGADO a llamar a la herramienta 'exit_loop' inmediatamente para no bloquear el sistema.\n"
+        "- En función del código de error devuelve feedback para que el JasonCoder pueda arreglar el programa\n"
+        "- Si la ejecución es exitosa (Return code: 0), llama a la herramienta 'exit_loop' para terminar la iteración."
+    ),
     tools=[test_mas_code],
     output_key="test_feedback"
 )
@@ -265,9 +292,9 @@ async def test_mas():
         # El método run_debug es ideal aquí porque nos imprimirá por consola 
         # todo el flujo mental, llamadas a RAG y testeos de los agentes.
         await runner.run_debug(test_prompt, verbose=True)
-        
         print("\n=== ✨ TEST FINALIZADO ✨ ===")
         print("Si el testeo ha ido bien, revisa la carpeta 'output/pingpong' para ver los archivos.")
+    
         
     except Exception as e:
         print(f"\n❌ Error fatal en el Runner: {e}")
