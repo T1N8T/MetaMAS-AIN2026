@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from google.adk.agents import LlmAgent, SequentialAgent, ParallelAgent, LoopAgent
+from google.adk.tools import ToolContext
 from google.adk.models.lite_llm import LiteLlm
 import rag 
 import asyncio
@@ -115,6 +116,7 @@ def save_mas_code(mas_name: str, mas2j_code: str = "", agents_dict: dict = None)
     global current_retries, best_mas_state, best_error_count
     if agents_dict is None: agents_dict = {}
     project_dir = OUTPUT_DIR / mas_name
+    shutil.rmtree(project_dir, ignore_errors=True)
     project_dir.mkdir(parents=True, exist_ok=True)
     
     code_mas2j = mas2j_code if mas2j_code else best_mas_state.get("mas2j", "")
@@ -136,6 +138,8 @@ def save_mas_code(mas_name: str, mas2j_code: str = "", agents_dict: dict = None)
         return f"ÉXITO: Proyecto BDI guardado en {project_dir}"
     except Exception as e:
         return f"ERROR inesperado al guardar: {e}"
+def terminar():
+    sys.exit()
 
 
 # ==========================================
@@ -206,6 +210,9 @@ knowledge_gatherer = ParallelAgent(
     sub_agents=[rag_researcher, github_researcher]
 )
 
+
+
+
 # ==========================================
 # FASE 3: Bucle de Programación y Testeo (Loop)
 # ==========================================
@@ -213,14 +220,46 @@ coder_agent = LlmAgent(
     name="JasonCoder",
     model=model,
     description="Programa el MAS respetando estrictamente la sintaxis de Jason.",
-    instruction=("Basado en el análisis: {analysis_result}, Teoría: {theory_context}, y Ejemplos: {github_context}.\n"
-        "Feedback previo (si fallaste): {test_feedback}\n"
-        "REGLAS CRÍTICAS PARA .asl:\n"
-        "1. Variables en Mayúscula, átomos en minúscula.\n"
-        "2. Todo plan u objetivo DEBE acabar con punto (.).\n"
-        "3. Envíos de mensajes: .send(receiver, tell, ping).\n\n"
-        "Genera el código para el .mas2j y los .asl correspondientes separando claramente qué es qué."
-    ),
+    instruction=(
+    "Basado en el análisis: {analysis_result}, Teoría: {theory_context}, y Ejemplos: {github_context}.\n"
+    "Ten en cuenta el feedback de los tests anteriores.\n\n"
+
+    "REGLAS CRÍTICAS PARA JASON/ASL:\n"
+    "1. Devuelve SOLO JSON válido.\n"
+    "2. NO uses markdown.\n"
+    "3. NO uses ```.\n"
+    "4. Variables en Mayúscula.\n"
+    "5. Átomos y predicados en minúscula.\n"
+    "6. Todo plan, creencia y objetivo termina con punto (.).\n"
+    "7. Usa sintaxis válida de AgentSpeak(Jason).\n"
+    "8. Los planes deben usar el formato:\n"
+    "   +trigger : context <- body.\n"
+    "9. No inventes acciones internas inexistentes.\n"
+    "10. Las acciones internas deben empezar por punto.\n"
+    "11. No uses sintaxis de otros lenguajes.\n"
+    "12. Los mensajes usan .send.\n"
+    "13. No dejes planes vacíos.\n"
+    "14. No uses comentarios.\n"
+    "15. El .mas2j debe ser sintácticamente válido.\n"
+    "16. Incluye todos los agentes declarados en mas2j.\n"
+    "17. El envío de mensajes se realiza con .send(receptor, tell, contenido). El receptor reacciona directamente con un plan cuyo disparador sea +contenido, nunca capturando estructuras abstractas como +msg()."
+    "18. Cada archivo .asl debe contener únicamente código ASL.\n\n"
+
+    "Formato EXACTO:\n"
+    "{\n"
+    '  "mas2j": "...",\n'
+    '  "agents": {\n'
+    '    "agent1.asl": "...",\n'
+    '    "agent2.asl": "..."\n'
+    "  }\n"
+    "}\n"
+"""
+...
+REGLA DE ORO: Si en el historial del feedback ya aparece la palabra 'ÉXITO',
+tu ÚNICA tarea es devolver el mismo código JSON generado anteriormente, sin cambios. 
+NO intentes optimizarlo ni cambiarlo, simplemente vuelve a imprimir el JSON ya existente.
+"""
+),
     output_key="generated_code"
 )
 
@@ -230,10 +269,11 @@ tester_agent = LlmAgent(
     description="Prueba el código generado y decide si iterar o salir del bucle.",
     instruction=("Tienes este código recién generado: {generated_code}\n"
         "PASO 1: Llama a 'test_mas_code(mas2j_code, agents_dict)'. Asegúrate de que las claves en 'agents_dict' sean exactamente los nombres definidos en el .mas2j .\n"
-        "PASO 2: Revisa la respuesta.\n"
-        "- Si el log muestra 'ERROR: Límite de 5 intentos superado', ESTÁS OBLIGADO a llamar a la herramienta 'exit_loop' inmediatamente para no bloquear el sistema.\n"
-        "- En función del código de error devuelve feedback para que el JasonCoder pueda arreglar el programa\n"
-        "- Si la ejecución es exitosa (Return code: 0), llama a la herramienta 'exit_loop' para terminar la iteración."
+        "PASO 2: Analiza el resultado:\n"
+        "   - Si el test es exitoso (timeout o éxito), escribe ÚNICAMENTE: 'ÉXITO: [Resumen corto]'.\n"
+        "   - Si hay errores, escribe un feedback detallado para que el JasonCoder lo corrija.\n"
+        "   - Si se supera el límite de intentos, escribe: 'ERROR: Límite de 5 intentos superado'."
+        "REGLA DE ORO: 1. Si el código generado ya ha sido marcado como 'ÉXITO' en una iteración previa, devuelve inmediatamente: 'ÉXITO: Código ya verificado, saltando testeo.' y NO llames a la herramienta 'test_mas_code'."
     ),
     tools=[test_mas_code],
     output_key="test_feedback"
@@ -242,20 +282,25 @@ tester_agent = LlmAgent(
 refinement_loop = LoopAgent(
     name="RefinementLoop",
     sub_agents=[coder_agent, tester_agent],
-    max_iterations=5 
+    max_iterations=5,
 )
 
 # ==========================================
 # FASE 4: Guardado Final
 # ==========================================
 saver_agent = LlmAgent(
-    name="ProjectSaver",
+    name="Saver",
     model=model,
-    description="Guarda el proyecto en disco.",
-    instruction="Usa la herramienta save_mas_code para persistir el proyecto exitoso. El nombre del proyecto está en {analysis_result}.",
-    tools=[save_mas_code]
+    description="Agente encargado de guardar el código final una vez que el bucle de refinamiento ha concluido exitosamente.",
+    instruction=(
+        "Una vez que el bucle de refinamiento ha concluido exitosamente, tu tarea es guardar el código final.\n"
+        "Usa la función 'save_mas_code(mas_name, mas2j_code, agents_dict)' para guardar el proyecto.\n"
+        "El 'mas_name' debe ser el nombre del proyecto extraído en el {analysis_result}.\n"
+        "El 'mas2j_code' y 'agents_dict' deben ser el resultado final del bucle de refinamiento ({generated_code}).\n"
+        "Devuelve un mensaje de éxito o error basado en la respuesta de la función de guardado."
+        "En caso de éxito deberás llamar a 'terminar()'"
+    ),
 )
-
 # ==========================================
 # ORQUESTADOR FINAL
 # ==========================================
@@ -264,9 +309,9 @@ bdi_developer_mas = SequentialAgent(
     sub_agents=[
         analyzer_agent, 
         knowledge_gatherer, 
-        refinement_loop, 
-        saver_agent
-    ]
+        refinement_loop,
+        saver_agent 
+    ],
 )
 
 # ==========================================
@@ -298,6 +343,7 @@ async def test_mas():
         
     except Exception as e:
         print(f"\n❌ Error fatal en el Runner: {e}")
-
+    finally:
+        sys.exit()
 if __name__ == "__main__":
     asyncio.run(test_mas())
