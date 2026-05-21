@@ -104,9 +104,18 @@ def test_mas_code(mas2j_code: str, agents_dict: dict) -> str:
         return output
         
     except subprocess.TimeoutExpired as e:
+        # Extraemos la consola que Jason imprimió ANTES del timeout
+        stdout_text = e.stdout.decode('utf-8', errors='ignore') if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr_text = e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else (e.stderr or "")
+        
+        output = f"AVISO: Tiempo límite (15s). Normal si el MAS funciona de forma estable.\n"
+        if stdout_text: output += f"--- STDOUT ---\n{stdout_text}\n"
+        if stderr_text: output += f"--- STDERR ---\n{stderr_text}\n"
+        
         if best_error_count == float('inf'):
             best_mas_state = {"mas2j": mas2j_code, "agents": agents_dict}
-        return f"AVISO: Tiempo límite (15s). Normal si arranca GUI."
+            
+        return output # Ahora el Tester LLM sí verá si imprimieron "Ping" o "Pong"
     except Exception as e:
         return f"ERROR inesperado al ejecutar: {e}"
     finally:
@@ -226,61 +235,30 @@ coder_agent = LlmAgent(
         "- Análisis: {analysis_result}\n"
         "- Teoría: {theory_context}\n"
         "- Ejemplos: {github_context}\n"
-        "- Feedback previo: REVISA EL HISTORIAL: Si el CodeTester te ha dejado feedback de errores en la iteración anterior, lee su mensaje y corrige el código en consecuencia\n\n"
+        "- Feedback previo: REVISA EL HISTORIAL: Si el CodeTester te ha dejado feedback, lee su mensaje y corrige el código en consecuencia.\n\n"
         
-        "SALIDA:\n"
-        "Devuelve ÚNICAMENTE un objeto JSON válido. Sin markdown, sin bloques de código, sin explicaciones.\n\n"
-        
-        "ESTRUCTURA JSON:\n"
-        "{\n"
-        '  "mas2j": "string con contenido MAS2J",\n'
-        '  "agents": {"agentName.asl": "string ASL", ...}\n'
-        "}\n\n"
+        "SALIDA: Devuelve ÚNICAMENTE un objeto JSON válido. Sin markdown, sin explicaciones.\n\n"
         
         "REGLAS JASON/ASL CRÍTICAS:\n"
-        "1. Identificadores (agentes, predicados): minúscula (miAgente, miCreencia).\n"
-        "2. Variables y constantes: MAYÚSCULA (X, VALOR, RESULTADO).\n"
-        "3. Creencias: creencia(X). (terminan en punto)\n"
-        "4. Objetivos: !objetivo(X). (terminan en punto)\n"
-        "5. PUNTUACIÓN EN PLANES (esto es crítico):\n"
-        "   Formato: +evento : contexto <- acción1; acción2; acción3.\n"
-        "   - Acciones se SEPARAN con punto-coma (;)\n"
-        "   - La ÚLTIMA acción termina en PUNTO (.)\n"
-        "   - PROHIBIDO: punto (.) en medio de acciones\n"
-        "   - Ejemplo CORRECTO: +ping <- .print(\"ping\"); .send(pong, tell, msg); .wait(100).\n"
-        "   - Ejemplo INCORRECTO: +ping <- .print(\"ping\"). .send(pong, tell, msg).\n"
+        "1. Identificadores (agentes): minúscula (ej. ping, pong).\n"
+        "2. Variables: MAYÚSCULA.\n"
+        "3. Creencias y Objetivos Iniciales: Terminan en punto (.).\n"
+        "4. EL ARRANQUE (VITAL): El agente que inicia la interacción DEBE tener el objetivo inicial `!start.` en la línea 1 de su archivo .asl, totalmente suelto. Debajo, creas el plan `+!start <- ...`. Si no pones el `!start.` suelto, la consola se quedará en blanco.\n"
+        "5. PUNTUACIÓN EN PLANES (Crítico):\n"
+        "   - Formato: +evento : contexto <- acción1; acción2; acción3.\n"
+        "   - Las acciones se separan con punto-coma (;).\n"
+        "   - SOLO la última acción del plan termina con punto (.).\n"
         "6. Mensajes entre agentes:\n"
-        "   - Envío: .send(receptor, tell, contenido(datos)).\n"
-        "   - Recepción: +contenido(datos) : contexto <- acciones.\n"
-        "7. Acciones internas válidas: .send(), .wait(), .print(), .println(), .stopMAS, .stopGUI.\n"
-        "   - NO inventes acciones que no existan.\n"
-        "8. Cada .asl contiene SOLO código ASL:\n"
-        "   - Sin comentarios (%, //, #).\n"
-        "   - Sin markdown.\n"
-        "   - Sin bloques ```.\n"
-        "9. MAS2J: declarar agents, environments, clases Java si es necesario.\n"
-        "10. Planes sin cuerpo: PROHIBIDO. Todo plan debe tener al menos una acción.\n"
-        "11. Creencias iniciales (beliefs): sitúalas antes de los planes.\n"
-        "12. Plan de inicio: Siempre incluye +!start como punto de entrada para el primer agente.\n\n"
+        "   - Envío: .send(receptor, tell, contenido).\n"
+        "   - Recepción: +contenido : true <- acciones.\n"
+        "   - PROHIBIDO usar sintaxis inventada como `+m: msg(X)`. Usa directamente el contenido.\n"
+        "7. Acciones válidas: SOLO .send(), .wait(), .print().\n"
+        "   - PROHIBIDO usar .println(), .stopMAS, .stopGUI. USA SOLO .print().\n"
+        "8. El archivo .asl SOLO contiene código ASL. Cero comentarios.\n"
+        "9. FORMATO JSON: Usa `\\n` para los saltos de línea físicos dentro del código ASL. No escribas todo en una sola línea continua en el JSON.\n\n"
         
-        
-        "CHECKLIST OBLIGATORIO ANTES DE DEVOLVER:\n"
-        "✓ JSON sintácticamente válido (sin trailing commas, sin caracteres sueltos).\n"
-        "✓ Todos los agentes declarados en mas2j existen en la sección agents.\n"
-        "✓ Sin markdown, sin ```json, sin explicaciones en el JSON.\n"
-        "✓ Sintaxis AgentSpeak correcta (sin errores de puntuación).\n"
-        "✓ Identificadores: minúscula (agentes), MAYÚSCULA (variables).\n"
-        "✓ Puntos y punto-comas en el lugar correcto (;  entre acciones, . al final).\n"
-        "✓ Sin comentarios en archivos .asl.\n"
-        "✓ Cada plan tiene un disparador (+evento o +!objetivo).\n"
-        "✓ +!start existe en al menos un agente como punto de entrada.\n\n"
-        
-         "ESTRATEGIA DE CORRECCIÓN:\n"
-        "- Si feedback dice 'ÉXITO': devuelve el JSON anterior sin cambios.\n"
-        "- Si hay errores sintácticos: corrige SOLO la sintaxis, mantén la lógica.\n"
-        "- Si falla una acción: revisa que exista en Jason (.send, .wait, .print, etc.).\n"
-        "- Si un plan no dispara: verifica disparador y contexto.\n"
-        "- Prioriza claridad sobre complejidad.\n"
+        "ESTRATEGIA DE CORRECCIÓN:\n"
+        "- Si el feedback dice 'ÉXITO': devuelve el JSON anterior sin cambios.\n"
     ),
     output_key="generated_code"
 )
