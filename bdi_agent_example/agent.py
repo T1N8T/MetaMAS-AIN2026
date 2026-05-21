@@ -72,7 +72,6 @@ def test_mas_code(mas2j_code: str, agents_dict: dict) -> str:
          return f"ERROR: Límite de {MAX_RETRIES} intentos superado."
     current_retries += 1
     temp_dir = Path("temp_mas_project")
-    
     try:
         if temp_dir.exists(): shutil.rmtree(temp_dir)
         temp_dir.mkdir()
@@ -87,54 +86,29 @@ def test_mas_code(mas2j_code: str, agents_dict: dict) -> str:
         jason_command = resolve_jason_command()
         if not jason_command: return "ERROR: No se ha encontrado Jason."
 
-        # Usamos subprocess.run con 7 segundos de timeout
-        try:
-            result = subprocess.run(
-                [jason_command, "mas", "start", "--mas2j=temp.mas2j", "--console"],
-                cwd=str(temp_dir), capture_output=True, text=True, timeout=7
-            )
-            stdout_text = result.stdout or ""
-            stderr_text = result.stderr or ""
-        except subprocess.TimeoutExpired as e:
-            # Si el MAS corre estable, dará timeout. Capturamos los buffers.
-            # Usamos errors='ignore' por si Jason escupe algún carácter raro
-            stdout_text = e.stdout.decode('utf-8', errors='ignore') if isinstance(e.stdout, bytes) else (e.stdout or "")
-            stderr_text = e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else (e.stderr or "")
-
-        combined_output = stdout_text + "\n" + stderr_text
-
-        # --- ANÁLISIS DE ERRORES GENÉRICO ---
-        generic_errors = ["error parsing", "exception in thread", "compile error", "caused by:", "was expecting"]
-        has_error = any(err in combined_output.lower() for err in generic_errors)
-
-        if error_count := (10 + len(stderr_text.split('\n')) if has_error else 0):
-            if best_error_count == float('inf'): pass # Solo para que exista la variable
+        result = subprocess.run(
+            [jason_command, "mas", "start", "--mas2j=temp.mas2j", "--console"],
+            cwd=str(temp_dir), capture_output=True, text=True, timeout=15
+        )
+        
+        error_count = 10 if result.returncode != 0 else 0
+        if result.stderr: error_count += len(result.stderr.split('\n'))
             
-        if error_count < best_error_count and not has_error:
+        if error_count < best_error_count:
             best_error_count = error_count
             best_mas_state = {"mas2j": mas2j_code, "agents": agents_dict}
-
-        # ¡LA CLAVE ESTÁ AQUÍ! Tijera para evitar que el prompt explote
-        def truncate_log(log_str, max_chars=1500):
-            if len(log_str) > max_chars:
-                return log_str[:750] + "\n\n... [MILES DE LÍNEAS OMITIDAS POR TAMAÑO] ...\n\n" + log_str[-750:]
-            return log_str
-
-        stdout_trunc = truncate_log(stdout_text)
-        stderr_trunc = truncate_log(stderr_text)
-
-        # Formateamos la salida final para el Tester
-        output = f"=== EJECUCIÓN DE PRUEBA ({current_retries}/{MAX_RETRIES}) ===\n"
-        if stdout_trunc: output += f"--- STDOUT ---\n{stdout_trunc}\n"
-        if stderr_trunc: output += f"--- STDERR ---\n{stderr_trunc}\n"
-        
-        if has_error:
-            return f"=== ERROR DE COMPILACIÓN O SINTAXIS DETECTADO ===\n{output}"
             
-        return f"ÉXITO: El sistema multi-agente arrancó y se ejecutó de manera estable.\n{output}"
+        output = f"=== EJECUCIÓN DE PRUEBA ({current_retries}/{MAX_RETRIES}) ===\n"
+        if result.stdout: output += f"--- STDOUT ---\n{result.stdout}\n"
+        if result.stderr: output += f"--- STDERR ---\n{result.stderr}\n"
+        return output
         
+    except subprocess.TimeoutExpired as e:
+        if best_error_count == float('inf'):
+            best_mas_state = {"mas2j": mas2j_code, "agents": agents_dict}
+        return f"AVISO: Tiempo límite (15s). Normal si arranca GUI."
     except Exception as e:
-        return f"ERROR inesperado al ejecutar el test: {e}"
+        return f"ERROR inesperado al ejecutar: {e}"
     finally:
         if temp_dir.exists(): shutil.rmtree(temp_dir)
 
@@ -164,6 +138,7 @@ def save_mas_code(mas_name: str, mas2j_code: str = "", agents_dict: dict = None)
         return f"ÉXITO: Proyecto BDI guardado en {project_dir}"
     except Exception as e:
         return f"ERROR inesperado al guardar: {e}"
+
 def terminar():
     sys.exit()
 
@@ -245,47 +220,68 @@ knowledge_gatherer = ParallelAgent(
 coder_agent = LlmAgent(
     name="JasonCoder",
     model=model,
-    description="Programa el MAS respetando estrictamente la sintaxis de Jason.",
+    description="Genera código Jason/ASL sintácticamente válido en formato JSON puro.",
     instruction=(
-    "Basado en el análisis: {analysis_result}, Teoría: {theory_context}, y Ejemplos: {github_context}.\n"
-    "Ten en cuenta el feedback de los tests anteriores.\n\n"
-
-    "REGLAS CRÍTICAS PARA JASON/ASL:\n"
-    "1. Devuelve SOLO JSON válido.\n"
-    "2. NO uses markdown.\n"
-    "3. NO uses ```.\n"
-    "4. Variables en Mayúscula.\n"
-    "5. Átomos y predicados en minúscula.\n"
-    "6. Todo plan, creencia y objetivo termina con punto (.).\n"
-    "7. Usa sintaxis válida de AgentSpeak(Jason).\n"
-    "8. Los planes deben usar el formato:\n"
-    "   +trigger : context <- body.\n"
-    "9. No inventes acciones internas inexistentes.\n"
-    "10. Las acciones internas deben empezar por punto.\n"
-    "11. No uses sintaxis de otros lenguajes.\n"
-    "12. Los mensajes usan .send.\n"
-    "13. No dejes planes vacíos.\n"
-    "14. No uses comentarios.\n"
-    "15. El .mas2j debe ser sintácticamente válido.\n"
-    "16. Incluye todos los agentes declarados en mas2j.\n"
-    "17. El envío de mensajes se realiza con .send(receptor, tell, contenido). El receptor reacciona directamente con un plan cuyo disparador sea +contenido, nunca capturando estructuras abstractas como +msg()."
-    "18. Cada archivo .asl debe contener únicamente código ASL.\n\n"
-
-    "Formato EXACTO:\n"
-    "{\n"
-    '  "mas2j": "...",\n'
-    '  "agents": {\n'
-    '    "agent1.asl": "...",\n'
-    '    "agent2.asl": "..."\n'
-    "  }\n"
-    "}\n"
-"""
-...
-REGLA DE ORO: Si en el historial del feedback ya aparece la palabra 'ÉXITO',
-tu ÚNICA tarea es devolver el mismo código JSON generado anteriormente, sin cambios. 
-NO intentes optimizarlo ni cambiarlo, simplemente vuelve a imprimir el JSON ya existente.
-"""
-),
+        "Eres un generador de código Jason/ASL. Tu tarea es producir código correcto basado en:\n"
+        "- Análisis: {analysis_result}\n"
+        "- Teoría: {theory_context}\n"
+        "- Ejemplos: {github_context}\n"
+        "- Feedback previo: REVISA EL HISTORIAL: Si el CodeTester te ha dejado feedback de errores en la iteración anterior, lee su mensaje y corrige el código en consecuencia\n\n"
+        
+        "SALIDA:\n"
+        "Devuelve ÚNICAMENTE un objeto JSON válido. Sin markdown, sin bloques de código, sin explicaciones.\n\n"
+        
+        "ESTRUCTURA JSON:\n"
+        "{\n"
+        '  "mas2j": "string con contenido MAS2J",\n'
+        '  "agents": {"agentName.asl": "string ASL", ...}\n'
+        "}\n\n"
+        
+        "REGLAS JASON/ASL CRÍTICAS:\n"
+        "1. Identificadores (agentes, predicados): minúscula (miAgente, miCreencia).\n"
+        "2. Variables y constantes: MAYÚSCULA (X, VALOR, RESULTADO).\n"
+        "3. Creencias: creencia(X). (terminan en punto)\n"
+        "4. Objetivos: !objetivo(X). (terminan en punto)\n"
+        "5. PUNTUACIÓN EN PLANES (esto es crítico):\n"
+        "   Formato: +evento : contexto <- acción1; acción2; acción3.\n"
+        "   - Acciones se SEPARAN con punto-coma (;)\n"
+        "   - La ÚLTIMA acción termina en PUNTO (.)\n"
+        "   - PROHIBIDO: punto (.) en medio de acciones\n"
+        "   - Ejemplo CORRECTO: +ping <- .print(\"ping\"); .send(pong, tell, msg); .wait(100).\n"
+        "   - Ejemplo INCORRECTO: +ping <- .print(\"ping\"). .send(pong, tell, msg).\n"
+        "6. Mensajes entre agentes:\n"
+        "   - Envío: .send(receptor, tell, contenido(datos)).\n"
+        "   - Recepción: +contenido(datos) : contexto <- acciones.\n"
+        "7. Acciones internas válidas: .send(), .wait(), .print(), .println(), .stopMAS, .stopGUI.\n"
+        "   - NO inventes acciones que no existan.\n"
+        "8. Cada .asl contiene SOLO código ASL:\n"
+        "   - Sin comentarios (%, //, #).\n"
+        "   - Sin markdown.\n"
+        "   - Sin bloques ```.\n"
+        "9. MAS2J: declarar agents, environments, clases Java si es necesario.\n"
+        "10. Planes sin cuerpo: PROHIBIDO. Todo plan debe tener al menos una acción.\n"
+        "11. Creencias iniciales (beliefs): sitúalas antes de los planes.\n"
+        "12. Plan de inicio: Siempre incluye +!start como punto de entrada para el primer agente.\n\n"
+        
+        
+        "CHECKLIST OBLIGATORIO ANTES DE DEVOLVER:\n"
+        "✓ JSON sintácticamente válido (sin trailing commas, sin caracteres sueltos).\n"
+        "✓ Todos los agentes declarados en mas2j existen en la sección agents.\n"
+        "✓ Sin markdown, sin ```json, sin explicaciones en el JSON.\n"
+        "✓ Sintaxis AgentSpeak correcta (sin errores de puntuación).\n"
+        "✓ Identificadores: minúscula (agentes), MAYÚSCULA (variables).\n"
+        "✓ Puntos y punto-comas en el lugar correcto (;  entre acciones, . al final).\n"
+        "✓ Sin comentarios en archivos .asl.\n"
+        "✓ Cada plan tiene un disparador (+evento o +!objetivo).\n"
+        "✓ +!start existe en al menos un agente como punto de entrada.\n\n"
+        
+         "ESTRATEGIA DE CORRECCIÓN:\n"
+        "- Si feedback dice 'ÉXITO': devuelve el JSON anterior sin cambios.\n"
+        "- Si hay errores sintácticos: corrige SOLO la sintaxis, mantén la lógica.\n"
+        "- Si falla una acción: revisa que exista en Jason (.send, .wait, .print, etc.).\n"
+        "- Si un plan no dispara: verifica disparador y contexto.\n"
+        "- Prioriza claridad sobre complejidad.\n"
+    ),
     output_key="generated_code"
 )
 
@@ -296,10 +292,21 @@ tester_agent = LlmAgent(
     instruction=("Tienes este código recién generado: {generated_code}\n"
         "PASO 1: Llama a 'test_mas_code(mas2j_code, agents_dict)'. Asegúrate de que las claves en 'agents_dict' sean exactamente los nombres definidos en el .mas2j .\n"
         "PASO 2: Analiza el resultado:\n"
-        "   - Si el test devuelve un texto que empieza por 'ÉXITO:', escribe ÚNICAMENTE: 'ÉXITO: [Resumen corto]'.\n"
-        "   - Si hay errores, escribe un feedback detallado para que el JasonCoder lo corrija.\n"
+        "REGLA ESTRICTA CONTRA EXCUSAS:\n"
+        "Si el test da timeout (15s):\n"
+        "1. Timeout + mensajes en STDOUT = OK (el código funcionó, solo necesita .stopMAS)\n"
+        "2. Timeout + sin mensajes = ERROR en el código ASL\n"
+        "   Culpables comunes:\n"
+        "   - Falta +!start\n"
+        "   - Errores de puntuación (punto/punto-coma)\n"
+        "   - Disparadores incorrectos\n"
+        "   - Falta .stopMAS al final\n"
+        "3. Nunca culpes al GUI ni al entorno. Siempre es el código.\n"
+        "   - REGLA DE ORO DEL TESTEO: No te fíes solo de que compile. Lee atentamente el STDOUT devuelto por la herramienta. Si en el STDOUT NO hay mensajes impresos por los agentes (es decir, el sistema arrancó pero se quedó en blanco/mudo), DEBES DEVOLVER UN ERROR. Dile al Coder: 'El código compila pero los agentes no hacen nada. Revisa la lógica de arranque (ej. añadir un objetivo inicial !start.) y asegúrate de separar las acciones con punto y coma (;).'\n"
+        "   - Si el test es exitoso Y los agentes interactúan en el STDOUT, escribe ÚNICAMENTE: 'ÉXITO: [Resumen corto]'.\n"
+        "   - Si hay errores de compilación, escribe un feedback detallado para que el JasonCoder lo corrija.\n"
         "   - Si se supera el límite de intentos, escribe: 'ERROR: Límite de 5 intentos superado'.\n"
-        "REGLA DE ORO: 1. Si el código generado ya ha sido marcado como 'ÉXITO' en una iteración previa, devuelve inmediatamente: 'ÉXITO: Código ya verificado, saltando testeo.' y NO llames a la herramienta 'test_mas_code'."
+        "REGLA PREVIA: Si el código ya ha sido marcado como 'ÉXITO' en una iteración anterior, devuelve: 'ÉXITO: Código ya verificado, saltando testeo.' y NO llames a la herramienta."
     ),
     tools=[test_mas_code],
     output_key="test_feedback"
@@ -326,6 +333,7 @@ saver_agent = LlmAgent(
         "Devuelve un mensaje de éxito o error basado en la respuesta de la función de guardado."
         "En caso de éxito deberás llamar a 'terminar()'"
     ),
+    tools=[save_mas_code, terminar]
 )
 # ==========================================
 # ORQUESTADOR FINAL
