@@ -160,6 +160,12 @@ model = LiteLlm(
     api_base=os.getenv("OPENAI_API_BASE"), 
     api_key=os.getenv("OPENAI_API_KEY") 
 )
+model_nothinker = LiteLlm(
+    model="openai/Qwen3.6-35B-A3B-FP8",
+    api_base=os.getenv("OPENAI_API_BASE"),
+    api_key=os.getenv("OPENAI_API_KEY"),
+    extra_body={"chat_template_kwargs": {"enable_thinking": False}}
+)
 
 
 # ==========================================
@@ -186,14 +192,24 @@ analyzer_agent = LlmAgent(
 rag_researcher = LlmAgent(
     name="RAG_Researcher",
     model=model,
-    description="Busca teoría BDI y sintaxis en los PDF locales.",
+    description="Busca teoría BDI y sintaxis literal en los PDF locales.",
     instruction=(
-        "Usa el análisis previo: {analysis_result}\n"
-        "ESTÁS OBLIGADO a llamar a la herramienta 'search_local_docs(query)'.\n"
-        "Usa como 'query' los conceptos técnicos para extraer la teoría sobre cómo se programan esas acciones. Resume la sintaxis obligatoria."
-        "ESTÁ ESTRÍCTAMENTE PROHIBIDO que escribas código .asl o .mas2j para resolver el problema del usuario."
-        "Devuelve ÚNICAMENTE un resumen de la sintaxis teórica que has encontrado."
-    ),
+    "Usa el análisis previo: {analysis_result}\n"
+    "Busca CÓMO se implementan los conceptos técnicos detectados usando `search_local_docs(query)`.\n\n"
+
+    "PROTOCOLO: Máximo 3 llamadas, una por concepto técnico. "
+    "Contador interno: [1/3], [2/3], [3/3]. "
+    "Al llegar a [3/3] tu turno termina inmediatamente.\n\n"
+
+    "FORMATO DE SALIDA OBLIGATORIO:\n"
+    "FRAGMENTOS:\n"
+    "[fragmentos literales encontrados, o 'Sin documentación local para [concepto]']\n\n"
+
+    "PROHIBICIONES:\n"
+    "- Nunca expliques la sintaxis con tus palabras.\n"
+    "- Nunca inventes fragmentos si no los encuentras.\n"
+    "- Nunca hagas una cuarta llamada.\n"
+),
     tools=[rag.search_local_docs],
     output_key="theory_context"
 )
@@ -201,20 +217,35 @@ rag_researcher = LlmAgent(
 github_researcher = LlmAgent(
     name="GitHub_Researcher",
     model=model,
-    description="Busca ejemplos de arquitectura y sintaxis BDI en GitHub.",
+    description="Explora repositorios para extraer ejemplos reales de código Jason.",
     instruction=(
         "Usa el análisis previo: {analysis_result}\n"
-        "Tu misión es encontrar ejemplos de código real para evitar errores de sintaxis.\n"
-        "PASO 1: Llama a search_github_examples(path=\"\") para ver las carpetas.\n"
-        "PASO 2: Entra en una carpeta relevante (ej. si ves 'ping', llama a search_github_examples(path=\"ping\") para listar su interior).\n"
-        "PASO 3: ESTÁS OBLIGADO a leer el contenido de un archivo con extensión '.mas2j' para ver su estructura exacta, llamando a search_github_examples(path=\"carpeta_elegida/archivo.mas2j\").\n"
-        "Devuelve un resumen con el contenido exacto del .mas2j encontrado y los comandos clave de los .asl."
-        "ESTÁ ESTRÍCTAMENTE PROHIBIDO que escribas código .asl o .mas2j para resolver el problema del usuario."
+        "Tu misión es buscar código real usando `search_github_examples(path)`.\n\n"
+        
+        "PROTOCOLO DE EXPLORACIÓN (MÁXIMO 3 LLAMADAS EN TOTAL, SIN EXCEPCIÓN):\n"
+        "- Llamada 1 (obligatoria): `path=\"\"` para listar la raíz.\n"
+        "- Llamada 2 (obligatoria): elige UNA carpeta relevante y léela.\n"
+        "- Llamada 3 (obligatoria): elige UN archivo .asl o .mas2j dentro de esa carpeta y léelo.\n"
+        "Tras la tercera llamada, tu turno TERMINA INMEDIATAMENTE. "
+        "Aunque no hayas encontrado el ejemplo perfecto. Aunque queden carpetas por explorar.\n\n"
+        
+        "CONTADOR INTERNO: Lleva la cuenta en tu cabeza: [1/3], [2/3], [3/3]. "
+        "Al llegar a [3/3], la siguiente acción es siempre tu respuesta final, nunca otra llamada.\n\n"
+        
+        "FORMATO DE SALIDA OBLIGATORIO:\n"
+        "Devuelve ÚNICAMENTE dos bloques, sin texto libre entre ellos:\n\n"
+        "ARCHIVO: [ruta/del/archivo.asl o 'ninguno']\n"
+        "CODIGO:\n"
+        "[pega aquí el contenido literal del archivo, o 'No se encontró código relevante']\n\n"
+        
+        "PROHIBICIONES:\n"
+        "- Nunca escribas explicaciones, opiniones ni resúmenes fuera del formato.\n"
+        "- Nunca inventes código ni completes fragmentos incompletos.\n"
+        "- Nunca hagas una cuarta llamada a la herramienta."
     ),
     tools=[search_github_examples],
     output_key="github_context"
 )
-
 knowledge_gatherer = ParallelAgent(
     name="KnowledgeGatherer",
     sub_agents=[rag_researcher, github_researcher]
@@ -231,61 +262,73 @@ coder_agent = LlmAgent(
     model=model,
     description="Genera código Jason/ASL sintácticamente válido en formato JSON puro.",
     instruction=(
-        "Eres un generador de código Jason/ASL. Tu tarea es producir código correcto basado en:\n"
-        "- Análisis: {analysis_result}\n"
-        "- Teoría: {theory_context}\n"
-        "- Ejemplos: {github_context}\n"
-        "- Feedback previo: REVISA EL HISTORIAL: Si el CodeTester te ha dejado feedback, lee su mensaje y corrige el código en consecuencia.\n\n"
-        
-        "SALIDA: Devuelve ÚNICAMENTE un objeto JSON válido. Sin markdown, sin explicaciones.\n\n"
-        
-        "REGLAS JASON/ASL CRÍTICAS:\n"
-        "1. Identificadores (agentes): minúscula (ej. ping, pong).\n"
-        "2. Variables: MAYÚSCULA.\n"
-        "3. Creencias y Objetivos Iniciales: Terminan en punto (.).\n"
-        "4. EL ARRANQUE (VITAL): El agente que inicia la interacción DEBE tener el objetivo inicial `!start.` en la línea 1 de su archivo .asl, totalmente suelto. Debajo, creas el plan `+!start <- ...`. Si no pones el `!start.` suelto, la consola se quedará en blanco.\n"
-        "5. PUNTUACIÓN EN PLANES (Crítico):\n"
-        "   - Formato: +evento : contexto <- acción1; acción2; acción3.\n"
-        "   - Las acciones se separan con punto-coma (;).\n"
-        "   - SOLO la última acción del plan termina con punto (.).\n"
-        "6. Mensajes entre agentes:\n"
-        "   - Envío: .send(receptor, tell, contenido).\n"
-        "   - Recepción: +contenido : true <- acciones.\n"
-        "   - PROHIBIDO usar sintaxis inventada como `+m: msg(X)`. Usa directamente el contenido.\n"
-        "7. Acciones válidas: SOLO .send(), .wait(), .print().\n"
-        "   - PROHIBIDO usar .println(), .stopMAS, .stopGUI. USA SOLO .print().\n"
-        "8. El archivo .asl SOLO contiene código ASL. Cero comentarios.\n"
-        "9. FORMATO JSON: Usa `\\n` para los saltos de línea físicos dentro del código ASL. No escribas todo en una sola línea continua en el JSON.\n\n"
-        
-        "ESTRATEGIA DE CORRECCIÓN:\n"
-        "- Si el feedback dice 'ÉXITO': devuelve el JSON anterior sin cambios.\n"
-    ),
+    "Eres un generador de código Jason/ASL. Tu tarea es producir código correcto basado en:\n"
+    "- Análisis: {analysis_result}\n"
+    "- Teoría: {theory_context}\n"
+    "- Ejemplos: {github_context}\n"
+    "- Feedback previo: REVISA EL HISTORIAL: Si el CodeTester ha dejado feedback, "
+    "lee su CONSOLA_RAW y corrige el código en consecuencia.\n\n"
+
+    "SALIDA: Devuelve ÚNICAMENTE un objeto JSON válido con dos claves: "
+    "'mas2j_code' (string) y 'agents_dict' (objeto). Sin markdown, sin explicaciones.\n\n"
+
+    "REGLAS JASON/ASL CRÍTICAS:\n"
+    "1. Identificadores (agentes): minúscula (ej. ping, pong).\n"
+    "2. Variables: MAYÚSCULA.\n"
+    "3. Creencias y Objetivos Iniciales: Terminan en punto (.).\n"
+    "4. EL ARRANQUE (VITAL): El agente que inicia la interacción DEBE tener el objetivo inicial "
+    "`!start.` en la línea 1 de su archivo .asl, totalmente suelto. "
+    "Debajo, creas el plan `+!start <- ...`. "
+    "Si no pones el `!start.` suelto, la consola se quedará en blanco.\n"
+    "5. PUNTUACIÓN EN PLANES (Crítico):\n"
+    "   - Formato: +evento : contexto <- acción1; acción2; acción3.\n"
+    "   - Las acciones se separan con punto-coma (;).\n"
+    "   - SOLO la última acción del plan termina con punto (.).\n"
+    "6. Mensajes entre agentes:\n"
+    "   - Envío: .send(receptor, tell, contenido).\n"
+    "   - Recepción: +contenido : true <- acciones.\n"
+    "   - PROHIBIDO usar sintaxis inventada como `+m: msg(X)`. Usa directamente el contenido.\n"
+    "7. Acciones válidas: SOLO .send(), .print().\n"
+    "   - PROHIBIDO: .println(), .stopMAS, .stopGUI, +!bucle.\n"
+    "8. Contadores: `N1 = N + 1; -+creencia(N1).` Prohibido: `-+creencia(N+1)`.\n"
+    "9. Recursión: usar `!bucle` en el cuerpo. Prohibido: `+!bucle`.\n"
+    "10. FORMATO MAS2J OBLIGATORIO:\n"
+    "    MAS nombre {\n"
+    "        infrastructure: Local\n"
+    "        agents:\n"
+    "            agente1;\n"
+    "            agente2;\n"
+    "    }\n"
+    "11. FORMATO JSON: Usa `\\n` para saltos de línea dentro del código ASL.\n\n"
+
+    "ESTRATEGIA DE CORRECCIÓN:\n"
+    "- TIMEOUT_OK sin STDERR limpio: revisa la lógica.\n"
+    "- TIMEOUT_OK con warnings en STDERR: corrígelos.\n"
+    "- EXITO: devuelve el JSON anterior sin cambios.\n"
+    "- LIMITE_SUPERADO: devuelve tu mejor versión.\n"
+    "- Cualquier ERROR: lee CONSOLA_RAW y corrige.\n"
+),
     output_key="generated_code"
 )
 
 tester_agent = LlmAgent(
     name="CodeTester",
-    model=model,
-    description="Prueba el código generado y decide si iterar o salir del bucle.",
-    instruction=("Tienes este código recién generado: {generated_code}\n"
-        "PASO 1: Llama a 'test_mas_code(mas2j_code, agents_dict)'. Asegúrate de que las claves en 'agents_dict' sean exactamente los nombres definidos en el .mas2j .\n"
-        "PASO 2: Analiza el resultado:\n"
-        "REGLA ESTRICTA CONTRA EXCUSAS:\n"
-        "Si el test da timeout (15s):\n"
-        "1. Timeout + mensajes en STDOUT = OK (el código funcionó, solo necesita .stopMAS)\n"
-        "2. Timeout + sin mensajes = ERROR en el código ASL\n"
-        "   Culpables comunes:\n"
-        "   - Falta +!start\n"
-        "   - Errores de puntuación (punto/punto-coma)\n"
-        "   - Disparadores incorrectos\n"
-        "   - Falta .stopMAS al final\n"
-        "3. Nunca culpes al GUI ni al entorno. Siempre es el código.\n"
-        "   - REGLA DE ORO DEL TESTEO: No te fíes solo de que compile. Lee atentamente el STDOUT devuelto por la herramienta. Si en el STDOUT NO hay mensajes impresos por los agentes (es decir, el sistema arrancó pero se quedó en blanco/mudo), DEBES DEVOLVER UN ERROR. Dile al Coder: 'El código compila pero los agentes no hacen nada. Revisa la lógica de arranque (ej. añadir un objetivo inicial !start.) y asegúrate de separar las acciones con punto y coma (;).'\n"
-        "   - Si el test es exitoso Y los agentes interactúan en el STDOUT, escribe ÚNICAMENTE: 'ÉXITO: [Resumen corto]'.\n"
-        "   - Si hay errores de compilación, escribe un feedback detallado para que el JasonCoder lo corrija.\n"
-        "   - Si se supera el límite de intentos, escribe: 'ERROR: Límite de 5 intentos superado'.\n"
-        "REGLA PREVIA: Si el código ya ha sido marcado como 'ÉXITO' en una iteración anterior, devuelve: 'ÉXITO: Código ya verificado, saltando testeo.' y NO llames a la herramienta."
-    ),
+    model=model_nothinker,
+    description="Ejecuta el código del JasonCoder una única vez y devuelve el log de consola sin modificarlo.",
+    instruction=(
+    "Eres un ejecutor de consola. Sigue estos pasos sin excepción:\n\n"
+    "1. Extrae 'mas2j_code' y 'agents_dict' del JSON en {generated_code}.\n"
+    "2. Llama a `test_mas_code` UNA SOLA VEZ con esos valores exactos.\n"
+    "3. Devuelve ÚNICAMENTE esto:\n\n"
+    "CONSOLA_RAW:\n"
+    "[string devuelto por la tool]\n\n"
+    "ESTADO: [LIMITE_SUPERADO | TIMEOUT_OK | ERROR | EXITO]\n\n"
+    "Tabla de estado:\n"
+    "  'ERROR: Límite' → LIMITE_SUPERADO\n"
+    "  'AVISO: Tiempo' → TIMEOUT_OK\n"
+    "  'ERROR'         → ERROR\n"
+    "  otro            → EXITO\n"
+),
     tools=[test_mas_code],
     output_key="test_feedback"
 )
@@ -299,17 +342,30 @@ refinement_loop = LoopAgent(
 # ==========================================
 # FASE 4: Guardado Final
 # ==========================================
+# saver_agent = LlmAgent(
+#     name="Saver",
+#     model=model,
+#     description="Agente encargado de guardar el código final una vez que el bucle de refinamiento ha concluido exitosamente.",
+#     instruction=(
+#         "Una vez que el bucle de refinamiento ha concluido exitosamente, tu tarea es guardar el código final.\n"
+#         "Usa la función 'save_mas_code(mas_name, mas2j_code, agents_dict)' para guardar el proyecto.\n"
+#         "El 'mas_name' debe ser el nombre del proyecto extraído en el {analysis_result}.\n"
+#         "El 'mas2j_code' y 'agents_dict' deben ser el resultado final del bucle de refinamiento ({generated_code}).\n"
+#         "Devuelve un mensaje de éxito o error basado en la respuesta de la función de guardado."
+#         "En caso de éxito deberás llamar a 'terminar()'"
+#     ),
+#     tools=[save_mas_code, terminar]
+# )
+
 saver_agent = LlmAgent(
     name="Saver",
     model=model,
-    description="Agente encargado de guardar el código final una vez que el bucle de refinamiento ha concluido exitosamente.",
+    description="Agente encargado de guardar el código final.",
     instruction=(
-        "Una vez que el bucle de refinamiento ha concluido exitosamente, tu tarea es guardar el código final.\n"
-        "Usa la función 'save_mas_code(mas_name, mas2j_code, agents_dict)' para guardar el proyecto.\n"
-        "El 'mas_name' debe ser el nombre del proyecto extraído en el {analysis_result}.\n"
-        "El 'mas2j_code' y 'agents_dict' deben ser el resultado final del bucle de refinamiento ({generated_code}).\n"
-        "Devuelve un mensaje de éxito o error basado en la respuesta de la función de guardado."
-        "En caso de éxito deberás llamar a 'terminar()'"
+        "Tu tarea es guardar el código. No importa si el bucle terminó con 'ÉXITO' o con 'Límite superado'.\n"
+        "1. Usa la función 'save_mas_code(mas_name, mas2j_code, agents_dict)' para guardar ese código.\n"
+        "2. El 'mas2j_code' y 'agents_dict' deben ser el resultado final del bucle de refinamiento ({generated_code}).\n"
+        "3. Llama obligatoriamente a 'terminar()'.\n"
     ),
     tools=[save_mas_code, terminar]
 )
@@ -333,14 +389,21 @@ bdi_developer_mas = SequentialAgent(
 async def test_mas():
     print("🚀 Iniciando el MetaMAS BDI Developer...\n")
     
+    # test_prompt = (
+    #     "Crea un sistema multi-agente llamado pingpong. "
+    #     "Debe tener dos agentes haciendo un ping: un agente envía un mensaje 'Ping' "
+    #     "y el otro le contesta con un 'Pong'. Ambos imprimen el mensaje recibido."
+    # )
+
     test_prompt = (
-        "Crea un sistema multi-agente llamado pingpong. "
+        "Crea un sistema multi-agente llamado pingpong2. "
         "Debe tener dos agentes haciendo un ping: un agente envía un mensaje 'Ping' "
         "y el otro le contesta con un 'Pong'. Ambos imprimen el mensaje recibido."
+        "Este intercambio de mensajes debe repetirse exactamente 3 veces y luego ambos agentes deben detenerse."
     )
     
-    print(f"📝 Prompt de prueba:\n{test_prompt}\n")
-    print("⏳ Ejecutando agentes (arrancando el motor InMemoryRunner)...\n")
+    print(f" Prompt de prueba:\n{test_prompt}\n")
+    print(" Ejecutando agentes (arrancando el motor InMemoryRunner)...\n")
     
     try:
         # En ADK, el Runner es el que gestiona la sesión y lanza la ejecución de los agentes
@@ -349,12 +412,12 @@ async def test_mas():
         # El método run_debug es ideal aquí porque nos imprimirá por consola 
         # todo el flujo mental, llamadas a RAG y testeos de los agentes.
         await runner.run_debug(test_prompt, verbose=True)
-        print("\n=== ✨ TEST FINALIZADO ✨ ===")
+        print("\n===  TEST FINALIZADO  ===")
         print("Si el testeo ha ido bien, revisa la carpeta 'output/pingpong' para ver los archivos.")
     
         
     except Exception as e:
-        print(f"\n❌ Error fatal en el Runner: {e}")
+        print(f"\n Error fatal en el Runner: {e}")
     finally:
         sys.exit()
 if __name__ == "__main__":
