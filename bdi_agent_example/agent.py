@@ -388,13 +388,22 @@ async def test_mas():
     #     "ambos agentes deben detenerse."
     # )
 
-    test_prompt = (
-    "Crea un sistema multi-agente llamado fibonacci. "
-    "Debe tener un único agente llamado fib que calcule e imprima "
-    "la serie de Fibonacci hasta el valor 100. "
-    "El agente debe imprimir cada número de la serie uno a uno."
-    )
+    # test_prompt = (
+    # "Crea un sistema multi-agente llamado fibonacci. "
+    # "Debe tener un único agente llamado fib que calcule e imprima "
+    # "la serie de Fibonacci hasta el valor 100. "
+    # "El agente debe imprimir cada número de la serie uno a uno."
+    # )
     
+    test_prompt = (
+    "Crea un sistema multi-agente en Jason que simule una Subasta Holandesa. "
+    "El sistema debe tener 1 agente 'subastador' y exactamente 4 agentes 'participantes'. "
+    "El subastador intenta vender un artículo: comienza enviando un precio inicial alto a todos los participantes. "
+    "Si nadie acepta, el subastador reduce el precio un poco y envía el nuevo valor a todos. "
+    "Cada participante tiene un precio límite interno distinto que está dispuesto a pagar. Si el precio anunciado por el subastador baja hasta alcanzar o ser menor que su límite, el participante envía un mensaje aceptando la oferta. "
+    "El primer participante en aceptar gana el artículo. "
+    "Cuando el subastador recibe esta primera aceptación, anuncia públicamente quién es el ganador, la subasta se da por terminada y el sistema se detiene."
+    )
     print(f"Prompt de prueba:\n{test_prompt}\n")
     print("Ejecutando agentes...\n")
     
