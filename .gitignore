@@ -20,3 +20,10 @@ output/
 
 # SO
 .DS_Store
+# Logs y proyectos temporales de prueba
+debug_log.txt
+temp_mas_project/
+
+# Documentación del RAG (no se versiona)
+bdi_agent_example/docs/*
+!bdi_agent_example/docs/README.md
